@@ -114,10 +114,10 @@ static void GPSloop()
 void setup()
 {
 
-    Serial.begin(9600);
+    Serial.begin(115200);
     delay(50);
     Serial.println("Serial port started");
-    gps.initialize(9600, 2);
+    gps.initialize(9600, 1);
 
     gps.querySoftwareVersion();
 
@@ -168,6 +168,8 @@ void setup()
 
 void loop()
 {
-  //GPSloop();
-    Serial.write(gpsPort.read());
+    GPSloop();
+    //if(gpsPort.available()) {
+    //    Serial.write(gpsPort.read());
+    //}
 }

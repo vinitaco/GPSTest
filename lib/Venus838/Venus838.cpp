@@ -14,19 +14,15 @@ void Venus838::initialize(int baudrate, uint8_t updaterate) {
         if ( _debug ) _debugPort.println("Setting GPS baud rate to default (9600 baud)");
         _gpsPort.begin(9600);
         setFactoryDefaults(true);
-        delay(5000);
+        delay(100);
         currentBaudrate = 9600;
+        _gpsPort.end();
     }
 
     _gpsPort.begin(currentBaudrate);
     delay(50);
 
-    status = setBaudRate(baudrate);
-    
-    _gpsPort.end();
-
-    _gpsPort.begin(baudrate);
-    delay(50);
+    if (currentBaudrate != baudrate) status = setBaudRate(baudrate);
 
     if ( _debug ) { _debugPort.print("Status: "); _debugPort.println(status); }
 
@@ -63,7 +59,7 @@ bool Venus838::setBaudRate(int baudrate) {
     
     int baudrates[6] = { 4800, 9600, 19200, 38400, 57600, 115200 };
     int baudrateIndex = -1;
-    for( int i = 0; i < 6; ++i ) {
+    for( int i = 0; i < 6; i++ ) {
         if ( baudrate == baudrates[i] ) baudrateIndex = i;
     }
     if ( baudrateIndex == -1 ) {
@@ -77,18 +73,21 @@ bool Venus838::setBaudRate(int baudrate) {
     command[2] = baudrateIndex;
     command[3] = 0x00;
 
-    return sendCommand(command, 4);
+    if ( sendCommand(command, 4) ) {
+        _gpsPort.end();
+        _gpsPort.begin(baudrate);
+        return true;
+    } else return false;
 }
 
 // Gets the current baudrate to initialize the instrument
 int Venus838::getBaudRate() {
     if (_debug ) _debugPort.println("Getting baud rate");
     int baudrates[6] = { 4800, 9600, 19200, 38400, 57600, 115200 };
-    for(int i = 0; i < 6; i++) {
-        if (_debug ) { _debugPort.print("Starting gps port at "); _debugPort.println(baudrates[i]); }
+    for(int i = 0; i < 12; i++) {
+        if (_debug ) { _debugPort.print("Starting gps port at "); _debugPort.println(baudrates[i % 6]); }
 
-        _gpsPort.begin(baudrates[i]);
-        delay(50);
+        _gpsPort.begin(baudrates[i % 6]);
 
         char command[2] = {0x02, 0x01};  
         bool baudrateFound = sendCommand(command, 2);
@@ -96,11 +95,11 @@ int Venus838::getBaudRate() {
         _gpsPort.end();
 
         if (baudrateFound) {
-            if (_debug ) { _debugPort.print("Baud rate: "); _debugPort.println(baudrates[i]);}
-            return baudrates[i];
+            if (_debug ) { _debugPort.print("Baud rate found: "); _debugPort.println(baudrates[i % 6]); }
+            return baudrates[i % 6];
         }
     }
-    if (_debug ) _debugPort.println("Baud rate not found");
+    if ( _debug ) _debugPort.println("Baud rate not found");
 
     return -1;
 
@@ -121,7 +120,7 @@ bool Venus838::setUpdateRate(uint8_t updaterate) {
 
     uint8_t updaterates[] = {1, 2, 4, 5, 8, 10, 20};
     uint8_t updaterateIndex = -1;
-    for( int i = 0; i < 7; ++i ) {
+    for( int i = 0; i < 7; i++ ) {
         if ( updaterate == updaterates[i] ) updaterateIndex = i; 
     }
     if ( updaterateIndex == -1 ) return false;
@@ -156,6 +155,27 @@ bool Venus838::cfgNavigationMode(bool carMode) {
     return sendCommand(command, 3);
 }
 
+/*
+Configures the interval of NMEA messages 
+NMEAMessage structure:
+    byte 1: GGA interval = 01 (0 - 255, 00: disable, 01: default)
+    byte 2: GSA interval = 01 (0 - 255, 00: disable, 01: default)
+    byte 3: GSV interval = 01 (0 - 255, 00: disable, 01: default)
+    byte 4: GLL interval = 00 (0 - 255, 00: disable, 01: default)
+    byte 5: RMC interval = 01 (0 - 255, 00: disable, 01: default)
+    byte 6: VTG interval = 00 (0 - 255, 00: disable, 01: default)
+    byte 7: ZDA interval = 00 (0 - 255, 00: disable, 01: default)
+*/
+bool Venus838::cfgNMEAMessage(char* NMEAMessage) {
+    char command[9];
+    // Message id
+    command[0] = 0x08;
+    for(int i = 1; i < 8; i++) {
+        command[i] = NMEAMessage[i - 1];
+    }
+    command[8] = 0x00;
+    return sendCommand(command, 9);
+}
 
 /*
 Returns the software version
@@ -170,6 +190,7 @@ bool Venus838::querySoftwareVersion() {
     char response[21];
     getResponse(response, 21);
 
+    // TO PARSE LATER ON
     if (_debug ) { _debugPort.print("Software version: "); printBuffer(response, 21), _debugPort.print("\n"); }
 
     return status;
@@ -192,13 +213,13 @@ bool Venus838::sendCommand(char* command, uint commandSize) {
     buffer[3] = (char) commandSize;
 
     // buffer[4],.., buffer[4 + size of command - 1]: payload
-    for(int i = 0; i < commandSize; ++i) {
+    for(int i = 0; i < commandSize; i++) {
         buffer[i + 4] = command[i];
     }
 
     // buffer[4 + size of command]: checksum
     buffer[commandSize + 4] = 0x00;
-    for(int i = 0; i < commandSize; ++i) {
+    for(uint i = 0; i < commandSize; i++) {
         buffer[4 + commandSize] ^= command[i]; // ^ is the bitwise XOR operator
     }
 
@@ -208,49 +229,74 @@ bool Venus838::sendCommand(char* command, uint commandSize) {
 
     if (_debug ) { _debugPort.print("Command sent: "); printBuffer(buffer, commandSize + 7); _debugPort.print("\n"); }
 
-    while(!_gpsPort.available()) {}
-    _gpsPort.write(buffer, commandSize + 7);
-    _gpsPort.flush();
+    char response[9];
 
+    _gpsPort.write(buffer, commandSize + 7);
+
+    getResponse(response, 9);
 
     // Get 5th element of response: ACK or NACK
-    char response[5];
-    getResponse(response, 5);
-    return response[4] == ACK;
+    if ( response[4] != ACK ) {
+        if (_debug ) { _debugPort.println("Command failed. Trying again"); }
+        while(!_gpsPort.available()) {}
+        _gpsPort.write(buffer, commandSize + 7);
+        getResponse(response, 9);
+    }
+
+    return response[4] == ACK ;
+
 }
 
-// Reads the response message after a command to get the response and checks whether the response is ACK
+// Gets the response from the GPS
 void Venus838::getResponse(char* buffer, uint bufferSize) {
 
     if ( _debug ) _debugPort.println("Checking response");
 
     uint start = millis();
     // Read gps port and update buffer until 0xA0 and 0xA1 received // && response[messageSize + 5] != 0x0D && response[messageSize + 6] != 0x0A
-    while ( buffer[0] != 0xA0 && millis() - start < _timeout ) {
-        /*
+    while ( !(buffer[0] == 0xA0 && buffer[1] == 0xA1 && buffer[bufferSize - 2] == 0x0D && buffer[bufferSize - 1] == 0x0A) && millis() - start < _timeout ) {
         for(uint i = 0; i < bufferSize - 1; i++) {
             buffer[i] = buffer[i + 1];
         }
-        */
-        buffer[0] = buffer[1];
-        buffer[1] = buffer[2];
-        buffer[2] = buffer[3];
-        buffer[3] = buffer[4];
 
         while(!_gpsPort.available()) {}
-        //buffer[bufferSize - 1] = _gpsPort.read();
-        buffer[4] = _gpsPort.read();
+        buffer[bufferSize - 1] = _gpsPort.read();
         //if ( _debug ) { _debugPort.print("PACKET: "); printBuffer(buffer, bufferSize); _debugPort.print("\n"); }
     }
 
-    if ( _debug  && millis() - start >= _timeout ) { _debugPort.println("Timeout reached"); }
+    if ( _debug && millis() - start >= _timeout ) { _debugPort.println("Timeout reached"); }
     if ( _debug ) { _debugPort.print("Returned packet: "); printBuffer(buffer, bufferSize); _debugPort.print("\n"); }    
 }
 
 
+/*
+bool Venus838::getCommandResult() {
+    if ( _debug ) _debugPort.println("Checking command result");
+
+    char buffer[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
+
+
+    // Read gps port and update buffer until 0xA0 and 0xA1 received // && response[messageSize + 5] != 0x0D && response[messageSize + 6] != 0x0A
+    for( uint start = millis(); millis() - start < _timeout; ) {
+        while (_gpsPort.available()) {
+            buffer[0] = buffer[1];
+            buffer[1] = buffer[2];
+            buffer[2] = buffer[3];
+            buffer[3] = buffer[4];
+            buffer[4] = _gpsPort.read();
+            if ( buffer[0] == 0xA0 ) return buffer[4] == ACK ;
+        }
+    }
+
+    if ( _debug  ) { _debugPort.println("Timeout reached"); }
+
+    return buffer[4] == ACK;
+}
+*/
+
 void Venus838::printBuffer(char* buffer, uint bufferSize) {
     char hexval[4];
-    for(int i = 0; i < bufferSize; i++) {
+    for(uint i = 0; i < bufferSize; i++) {
         sprintf(hexval, "0x%02X", buffer[i]);
         _debugPort.print(hexval);
         if (i < bufferSize - 1) {
