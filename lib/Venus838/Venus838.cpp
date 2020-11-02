@@ -1,5 +1,7 @@
 #include "Venus838.h"
 
+
+
 Venus838::Venus838(HardwareSerial &gpsPort, HardwareSerial &debugPort, bool debug) : 
     _gpsPort(gpsPort),
     _debugPort(debugPort),
@@ -22,18 +24,31 @@ void Venus838::initialize(int baudrate, uint8_t updaterate) {
     _gpsPort.begin(currentBaudrate);
     delay(50);
 
-    if (currentBaudrate != baudrate) status = setBaudRate(baudrate);
+    if ( _debug ) { 
+        _debugPort.print("Current baud rate: "); _debugPort.println(currentBaudrate);
+        _debugPort.print("Baud rate setpoint: "); _debugPort.println(baudrate);
+    }
 
-    if ( _debug ) { _debugPort.print("Status: "); _debugPort.println(status); }
+    if ( currentBaudrate != baudrate ) status = setBaudRate(baudrate);
 
-    status = setUpdateRate(updaterate);
-    if ( _debug ) { _debugPort.print("Status: "); _debugPort.println(status); }
+    if ( _debug ) { _debugPort.print("Baudrate set: "); _debugPort.println(status); }
+
+    int currentUpdaterate = getUpdateRate();
+
+    if ( _debug ) { 
+        _debugPort.print("Current update rate: "); _debugPort.println(currentUpdaterate, DEC);
+        _debugPort.print("Upate rate setpoint: "); _debugPort.println(updaterate);
+    }
+    if (updaterate != currentUpdaterate) {
+        status = setUpdateRate(updaterate);
+        if ( _debug ) { _debugPort.print("Update rate set: "); _debugPort.println(status); }
+    }
 
     status = cfgWAAS(true);
-    if ( _debug ) { _debugPort.print("Status: "); _debugPort.println(status); }
+    if ( _debug ) { _debugPort.print("WAAS configuration: "); _debugPort.println(status); }
 
     status = cfgNavigationMode(true);
-    if ( _debug ) { _debugPort.print("Status: "); _debugPort.println(status); }
+    if ( _debug ) { _debugPort.print("Navigation mode configuration: "); _debugPort.println(status); }
 
 }
 
@@ -47,15 +62,16 @@ bool Venus838::setFactoryDefaults(bool reboot) {
 
 /*
 Configures baud rate of GPS
-    0x00 : 4800
-    0x01: 9600
-    0x02: 19200
-    0x03: 38400
-    0x04: 57600
-    0x05: 115200
+Possible values:
+    4800
+    9600
+    19200
+    38400
+    57600
+    115200
 */
 bool Venus838::setBaudRate(int baudrate) {
-    if ( _debug ) {_debugPort.print("Setting baud rate at "); _debugPort.println(baudrate);}
+    if ( _debug ) { _debugPort.print("Setting baud rate at "); _debugPort.println(baudrate); }
     
     int baudrates[6] = { 4800, 9600, 19200, 38400, 57600, 115200 };
     int baudrateIndex = -1;
@@ -105,32 +121,52 @@ int Venus838::getBaudRate() {
 
 }
 
-/*
-Configures update rate of GPS position
-    0x01: 1 Hz
-    0x02: 2 Hz
-    0x04: 4 Hz
-    0x05: 5 Hz
-    0x08: 8 Hz
-    0x0A: 10 Hz
-    0x14: 20 Hz
+
+/* Sets the update rate of GPS position (Hz)
+Possible values
+    1
+    2
+    4
+    5
+    8
+    10
+    20
 */
 bool Venus838::setUpdateRate(uint8_t updaterate) {
-    if ( _debug ) _debugPort.println("Setting update rate");
+    if ( _debug ) { _debugPort.print("Setting update rate at "); _debugPort.println(updaterate, DEC); }
 
     uint8_t updaterates[] = {1, 2, 4, 5, 8, 10, 20};
     uint8_t updaterateIndex = -1;
     for( int i = 0; i < 7; i++ ) {
         if ( updaterate == updaterates[i] ) updaterateIndex = i; 
     }
-    if ( updaterateIndex == -1 ) return false;
+    if ( updaterateIndex == -1 ) {
+        if ( _debug ) _debugPort.println("Invalid update rate");
+        return false;
+    }
 
     char command[3];
     command[0] = 0x0E;
-    command[1] = updaterates[updaterateIndex];
+    command[1] = updaterate;
     command[2] = 0x00;
 
     return sendCommand(command, 3);
+}
+
+// Gets the update rate of the GPS position (Hz)
+uint8_t Venus838::getUpdateRate() {
+    if ( _debug ) _debugPort.println("Querying update rate");
+
+    // Query update rate command
+    char command[1] = { 0x10 };
+    sendCommand(command, 1);
+
+    // Get response from GPS
+    char response[9];
+    getResponse(response, 9);
+
+    if ( _debug ) { _debugPort.print("GPS update rate: "); _debugPort.println((int) response[5], HEX); }
+    return response[5];
 }
 
 // Enables WAAS
@@ -198,7 +234,12 @@ bool Venus838::querySoftwareVersion() {
 }
 
 
-
+/*
+Send a command to the GPS
+Arguments:
+    command: the actual command [char]
+    commandSize: Command length
+*/
 bool Venus838::sendCommand(char* command, uint commandSize) {
     // See https://github.com/reed-foster/Venus838/blob/master/doc/gpscommands.md
     // Create command buffer
@@ -232,6 +273,7 @@ bool Venus838::sendCommand(char* command, uint commandSize) {
     char response[9];
 
     _gpsPort.write(buffer, commandSize + 7);
+    _gpsPort.flush();
 
     getResponse(response, 9);
 
@@ -244,8 +286,8 @@ bool Venus838::sendCommand(char* command, uint commandSize) {
     }
 
     return response[4] == ACK ;
-
 }
+
 
 // Gets the response from the GPS
 void Venus838::getResponse(char* buffer, uint bufferSize) {
@@ -253,7 +295,6 @@ void Venus838::getResponse(char* buffer, uint bufferSize) {
     if ( _debug ) _debugPort.println("Checking response");
 
     uint start = millis();
-    // Read gps port and update buffer until 0xA0 and 0xA1 received // && response[messageSize + 5] != 0x0D && response[messageSize + 6] != 0x0A
     while ( !(buffer[0] == 0xA0 && buffer[1] == 0xA1 && buffer[bufferSize - 2] == 0x0D && buffer[bufferSize - 1] == 0x0A) && millis() - start < _timeout ) {
         for(uint i = 0; i < bufferSize - 1; i++) {
             buffer[i] = buffer[i + 1];
@@ -261,38 +302,12 @@ void Venus838::getResponse(char* buffer, uint bufferSize) {
 
         while(!_gpsPort.available()) {}
         buffer[bufferSize - 1] = _gpsPort.read();
-        //if ( _debug ) { _debugPort.print("PACKET: "); printBuffer(buffer, bufferSize); _debugPort.print("\n"); }
     }
 
     if ( _debug && millis() - start >= _timeout ) { _debugPort.println("Timeout reached"); }
     if ( _debug ) { _debugPort.print("Returned packet: "); printBuffer(buffer, bufferSize); _debugPort.print("\n"); }    
 }
 
-
-/*
-bool Venus838::getCommandResult() {
-    if ( _debug ) _debugPort.println("Checking command result");
-
-    char buffer[5] = {0x00, 0x00, 0x00, 0x00, 0x00};
-
-
-    // Read gps port and update buffer until 0xA0 and 0xA1 received // && response[messageSize + 5] != 0x0D && response[messageSize + 6] != 0x0A
-    for( uint start = millis(); millis() - start < _timeout; ) {
-        while (_gpsPort.available()) {
-            buffer[0] = buffer[1];
-            buffer[1] = buffer[2];
-            buffer[2] = buffer[3];
-            buffer[3] = buffer[4];
-            buffer[4] = _gpsPort.read();
-            if ( buffer[0] == 0xA0 ) return buffer[4] == ACK ;
-        }
-    }
-
-    if ( _debug  ) { _debugPort.println("Timeout reached"); }
-
-    return buffer[4] == ACK;
-}
-*/
 
 void Venus838::printBuffer(char* buffer, uint bufferSize) {
     char hexval[4];
